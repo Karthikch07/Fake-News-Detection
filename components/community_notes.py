@@ -9,7 +9,6 @@ try:
     SENTENCE_TRANSFORMERS_AVAILABLE = True
 except ImportError:
     SENTENCE_TRANSFORMERS_AVAILABLE = False
-    st.warning("Sentence transformers not available for Community Notes. Using fallback methods.")
 
 class CommunityNotesGenerator:
     def __init__(self):
@@ -188,15 +187,21 @@ class CommunityNotesGenerator:
     def generate_summary(self, original_text, prediction_result, contradictions, confirmations):
         """Generate a summary for the Community Notes"""
         prediction = prediction_result['prediction']
-        confidence = prediction_result['confidence']
+        accuracy = prediction_result.get('accuracy')
         
         summary_parts = []
         
         # Start with prediction
-        summary_parts.append(
-            f"AI analysis suggests this content is **{prediction}** "
-            f"({confidence:.0f}% confidence)."
-        )
+        if isinstance(accuracy, (int, float)):
+            summary_parts.append(
+                f"AI analysis suggests this content is **{prediction}** "
+                f"({accuracy:.0f}% model accuracy)."
+            )
+        else:
+            summary_parts.append(
+                f"AI analysis suggests this content is **{prediction}** "
+                "(model accuracy unavailable)."
+            )
         
         # Add contradiction information
         if contradictions:

@@ -15,7 +15,6 @@ try:
     WHISPER_AVAILABLE = True
 except ImportError:
     WHISPER_AVAILABLE = False
-    st.warning("Whisper not available. Video transcription will be limited.")
 
 class TextExtractor:
     def __init__(self):
@@ -51,7 +50,7 @@ class TextExtractor:
         except Exception as e:
             raise Exception(f"URL extraction failed: {str(e)}")
     
-    def extract_from_image(self, uploaded_file):
+    def extract_from_image(self, uploaded_file, lang='eng', preprocess=True):
         """Extract text from image using OCR"""
         try:
             # Read image file
@@ -60,17 +59,20 @@ class TextExtractor:
             # Convert PIL image to OpenCV format for preprocessing
             opencv_image = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
             
-            # Preprocess image for better OCR results
-            gray = cv2.cvtColor(opencv_image, cv2.COLOR_BGR2GRAY)
-            
-            # Apply threshold to get better contrast
-            _, threshold = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            
-            # Convert back to PIL Image
-            processed_image = Image.fromarray(threshold)
-            
+            if preprocess:
+                # Preprocess image for better OCR results
+                gray = cv2.cvtColor(opencv_image, cv2.COLOR_BGR2GRAY)
+
+                # Apply threshold to get better contrast
+                _, threshold = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+                # Convert back to PIL Image
+                processed_image = Image.fromarray(threshold)
+            else:
+                processed_image = image
+
             # Extract text using pytesseract
-            extracted_text = pytesseract.image_to_string(processed_image, lang='eng')
+            extracted_text = pytesseract.image_to_string(processed_image, lang=lang)
             
             if not extracted_text.strip():
                 raise Exception("No text detected in the image")

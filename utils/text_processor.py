@@ -39,31 +39,15 @@ class TextProcessor:
             st.warning(f"NLTK setup warning: {e}")
     
     def preprocess_text(self, text):
-        """Complete text preprocessing pipeline"""
+        """Minimal text preprocessing for ML—keep most content intact."""
         if not text or not isinstance(text, str):
             return ""
         
-        try:
-            # Step 1: Basic cleaning
-            text = self.basic_cleaning(text)
-            
-            # Step 2: Tokenization
-            tokens = self.tokenize(text)
-            
-            # Step 3: Remove stopwords
-            tokens = self.remove_stopwords(tokens)
-            
-            # Step 4: Lemmatization
-            tokens = self.lemmatize_tokens(tokens)
-            
-            # Step 5: Remove short tokens
-            tokens = [token for token in tokens if len(token) > 2]
-            
-            return ' '.join(tokens)
-            
-        except Exception as e:
-            st.warning(f"Text preprocessing error: {e}")
-            return self.basic_cleaning(text)
+        # Minimal preprocessing: lowercase + simple whitespace cleanup
+        # Let TF-IDF handle tokenization/stemming
+        text = text.lower()
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text if text else ""
     
     def basic_cleaning(self, text):
         """Basic text cleaning operations"""

@@ -13,7 +13,6 @@ try:
     SENTENCE_TRANSFORMERS_AVAILABLE = True
 except ImportError:
     SENTENCE_TRANSFORMERS_AVAILABLE = False
-    st.warning("Sentence transformers not available. Using fallback similarity matching.")
 
 class FactVerifier:
     def __init__(self):
@@ -40,26 +39,35 @@ class FactVerifier:
         self.google_api_key = os.getenv("GOOGLE_API_KEY", "")
         self.google_cx = os.getenv("GOOGLE_CX", "")
         self.bing_api_key = os.getenv("BING_API_KEY", "")
+        self._fallback_notice_shown = False
     
     def verify_claims(self, text):
         """Verify claims by searching credible sources"""
         try:
             # Extract key claims/entities from text
             search_queries = self.extract_search_queries(text)
-            
+
+            has_google = bool(self.google_api_key and self.google_cx)
+            has_bing = bool(self.bing_api_key)
+
+            # If no external API is configured, return a deterministic offline fallback.
+            if not has_google and not has_bing:
+                sources = self.fallback_search(search_queries)
+                ranked_sources = self.rank_sources(text, self.deduplicate_sources(sources))
+                return {
+                    'sources': ranked_sources[:5],
+                    'search_queries': search_queries
+                }
+
             sources = []
             for query in search_queries:
                 # Try Google Search first, then Bing if available
-                if self.google_api_key and self.google_cx:
+                if has_google:
                     google_results = self.search_google(query)
                     sources.extend(google_results)
-                elif self.bing_api_key:
+                elif has_bing:
                     bing_results = self.search_bing(query)
                     sources.extend(bing_results)
-                else:
-                    # Fallback to direct domain search
-                    fallback_results = self.fallback_search(query)
-                    sources.extend(fallback_results)
             
             # Remove duplicates and rank by relevance
             unique_sources = self.deduplicate_sources(sources)
@@ -189,30 +197,44 @@ class FactVerifier:
             st.warning(f"Bing search failed: {str(e)}")
             return []
     
-    def fallback_search(self, query):
-        """Fallback search when APIs are not available"""
-        st.warning("⚠️ Search APIs not configured. Using fallback method.")
-        
-        # Create mock credible sources for demonstration
-        # In production, this would implement direct web scraping
-        fallback_sources = [
-            {
-                'title': f"Fact-check: {query[:50]}...",
-                'url': f"https://reuters.com/fact-check/{quote(query[:30])}",
-                'summary': "This claim requires verification against credible sources.",
-                'domain': 'reuters.com',
-                'source_type': 'fallback'
-            },
-            {
-                'title': f"Analysis: {query[:50]}...",
-                'url': f"https://bbc.com/news/{quote(query[:30])}",
-                'summary': "Further investigation needed to verify this information.",
-                'domain': 'bbc.com',
-                'source_type': 'fallback'
-            }
+    def fallback_search(self, queries):
+        """Offline fallback when APIs are not available."""
+        if isinstance(queries, str):
+            query_list = [queries]
+        else:
+            query_list = [q for q in (queries or []) if q and q.strip()]
+
+        if not query_list:
+            query_list = ["submitted claim"]
+
+        fallback_sources = []
+        source_catalog = [
+            "reuters.com",
+            "apnews.com",
+            "bbc.com",
+            "npr.org",
+            "theguardian.com",
         ]
-        
-        return fallback_sources[:2]
+
+        for i, query in enumerate(query_list[:3]):
+            domain = source_catalog[i % len(source_catalog)]
+            # Use a stable, public search URL filtered to each trusted domain.
+            search_query = f"site:{domain} {query[:80]}"
+            encoded_query = quote(search_query)
+            fallback_sources.append(
+                {
+                    'title': f"Offline verification note: {query[:70]}",
+                    'url': f"https://duckduckgo.com/?q={encoded_query}",
+                    'summary': (
+                        "API keys are not configured, so this result was generated using "
+                        "offline fallback guidance for further manual verification."
+                    ),
+                    'domain': domain,
+                    'source_type': 'offline_fallback'
+                }
+            )
+
+        return fallback_sources
     
     def extract_domain(self, url):
         """Extract domain from URL"""
