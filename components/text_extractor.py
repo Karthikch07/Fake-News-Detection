@@ -23,6 +23,32 @@ try:
 except ImportError:
     WHISPER_AVAILABLE = False
 
+def _decode_audio(path: str, sampling_rate: int = 16000) -> np.ndarray:
+    """Decode the first audio track to 16 kHz mono float32 with PyAV.
+
+    faster-whisper's own decoder passes an argument that PyAV 15+ removed, so
+    decoding here keeps transcription working whichever PyAV version is installed.
+    """
+    import av
+
+    chunks = []
+    resampler = av.AudioResampler(format="s16", layout="mono", rate=sampling_rate)
+    with av.open(path, mode="r") as container:
+        if not container.streams.audio:
+            raise ValueError("the file has no audio track")
+        for frame in container.decode(audio=0):
+            try:
+                for out in resampler.resample(frame):
+                    chunks.append(out.to_ndarray().reshape(-1))
+            except av.error.InvalidDataError:
+                continue
+        for out in resampler.resample(None):  # flush
+            chunks.append(out.to_ndarray().reshape(-1))
+    if not chunks:
+        raise ValueError("no audio could be decoded")
+    return np.concatenate(chunks).astype(np.float32) / 32768.0
+
+
 _TESSERACT_WINDOWS_PATHS = [
     r"C:\Program Files\Tesseract-OCR\tesseract.exe",
     r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
@@ -72,7 +98,7 @@ class TextExtractor:
         if FASTER_WHISPER_AVAILABLE:
             if self.whisper_model is None:  # lazy: download/load only when a video is used
                 self.whisper_model = WhisperModel(self._model_name, device="cpu", compute_type="int8")
-            segments, _info = self.whisper_model.transcribe(path, vad_filter=True)
+            segments, _info = self.whisper_model.transcribe(_decode_audio(path), vad_filter=True)
             return " ".join(seg.text.strip() for seg in segments)
         result = self.whisper_model.transcribe(path, fp16=False)
         return result.get("text") or ""

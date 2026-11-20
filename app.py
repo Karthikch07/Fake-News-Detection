@@ -30,19 +30,6 @@ INPUT_META = {
     "Video": {"sub": "Upload a clip. The speech is transcribed to text."},
 }
 
-EXAMPLES = {
-    "Sensational claim": "SHOCKING: Doctors are hiding a miracle cure that melts belly fat overnight - Big Pharma doesn't want you to know!",
-    "News report": "The central bank kept its benchmark interest rate unchanged on Thursday, officials said in a statement, citing easing inflation data.",
-    "Health claim": "Scientists confirm that drinking hot lemon water every morning kills cancer cells instantly.",
-}
-
-
-def _load_example() -> None:
-    choice = st.session_state.get("quick_example")
-    if choice in EXAMPLES:
-        st.session_state.quick_input_main = EXAMPLES[choice]
-
-
 def _card_header(title: str, subtitle: str, tag: str) -> str:
     from html import escape
 
@@ -160,7 +147,11 @@ def main():
                 '<div class="card-empty">Select <b>Input</b> in the sidebar to add content here.</div>',
                 unsafe_allow_html=True,
             )
-        elif ires.extracted_text:
+        else:
+            for err in ires.errors:
+                st.error(err)
+            for warn in ires.warnings:
+                st.caption(warn)
             meta = ires.meta or {}
             c1, c2 = st.columns([3, 1], vertical_alignment="center")
             with c1:
@@ -174,7 +165,7 @@ def main():
                     "Analyze",
                     type="primary",
                     use_container_width=True,
-                    disabled=bool(ires.errors),
+                    disabled=not ires.extracted_text or bool(ires.errors),
                     key="intake_analyze_btn",
                 )
             if intake_analyze:
@@ -227,53 +218,6 @@ def main():
         st.session_state.queue = st.session_state.queue[len(results) :]
         status.success(f"Batch complete. Ran {len(results)} item(s).")
         progress.progress(1.0)
-
-    # Quick input card for users who skip the sidebar
-    with st.container(key="quick_card"):
-        st.markdown(
-            _card_header("Quick check", "Paste a headline or a few sentences, or try one of the examples.", ""),
-            unsafe_allow_html=True,
-        )
-        st.pills(
-            "Try an example",
-            list(EXAMPLES),
-            key="quick_example",
-            on_change=_load_example,
-            label_visibility="collapsed",
-        )
-        quick_input = st.text_area(
-            "Headline or article text",
-            placeholder="Paste a headline or article text",
-            height=130,
-            key="quick_input_main",
-        )
-        q_words = len((quick_input or "").split())
-        c1, c2 = st.columns([3, 1], vertical_alignment="center")
-        with c1:
-            st.markdown(
-                f'<div class="counter"><b>{q_words}</b> words · '
-                f'<b>{len((quick_input or "").strip())}</b> characters</div>',
-                unsafe_allow_html=True,
-            )
-        with c2:
-            quick_analyze_btn = st.button(
-                "Analyze",
-                type="primary",
-                use_container_width=True,
-                key="quick_analyze_btn",
-                disabled=q_words == 0,
-            )
-
-    # Handle direct main-page analysis
-    if quick_analyze_btn and quick_input and quick_input.strip():
-        st.session_state.active_result = analyze_news(
-            quick_input.strip(),
-            components,
-            input_type="Text",
-            model_choice=st.session_state.model_choice,
-        )
-        _add_to_history(st.session_state.active_result)
-        st.rerun()
 
     st.markdown(
         '<div class="section-title"><h3>Result</h3><div class="line"></div></div>',

@@ -103,11 +103,11 @@ def inject_glass_css() -> None:
           .stApp button[kind="primary"]:disabled { opacity: .45; box-shadow: none; }
           .stApp button[kind="secondary"] { border-radius: 8px !important; border-color: rgba(255,255,255,.12) !important; background: rgba(255,255,255,.04) !important; }
           .stApp button[kind="secondary"]:hover { border-color: rgba(255,90,90,.55) !important; color: var(--text) !important; }
-          .st-key-quick_card [data-testid="stButtonGroup"] button {
+          .st-key-intake_card [data-testid="stButtonGroup"] button {
             border-radius: 999px !important; font-size: 12.5px !important;
             background: rgba(255,255,255,.04) !important; border: 1px solid rgba(255,255,255,.12) !important;
           }
-          .st-key-quick_card [data-testid="stButtonGroup"] button:hover { border-color: rgba(255,90,90,.55) !important; }
+          .st-key-intake_card [data-testid="stButtonGroup"] button:hover { border-color: rgba(255,90,90,.55) !important; }
 
           /* ---------- How it works ---------- */
           .steps { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid rgba(255,255,255,.08); border-radius: 14px; margin-top: 6px; background: rgba(255,255,255,.03); overflow: hidden; }

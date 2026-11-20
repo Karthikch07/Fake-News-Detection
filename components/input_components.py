@@ -72,11 +72,26 @@ def render_input_panel(*, extractor: TextExtractor, input_type: InputType) -> In
     return InputResult(input_type=input_type, extracted_text=None, errors=[f"Unsupported input type: {input_type}"])
 
 
+EXAMPLES = {
+    "Sensational claim": "SHOCKING: Doctors are hiding a miracle cure that melts belly fat overnight - Big Pharma doesn't want you to know!",
+    "News report": "The central bank kept its benchmark interest rate unchanged on Thursday, officials said in a statement, citing easing inflation data.",
+    "Health claim": "Scientists confirm that drinking hot lemon water every morning kills cancer cells instantly.",
+}
+
+
+def _load_example() -> None:
+    choice = st.session_state.get("text_example")
+    if choice in EXAMPLES:
+        st.session_state.intake_text = EXAMPLES[choice]
+
+
 def _render_text() -> InputResult:
+    st.pills("Try an example", list(EXAMPLES), key="text_example", on_change=_load_example,
+             label_visibility="collapsed")
     user_text = st.text_area(
-        "Enter news text or headline",
-        height=160,
-        placeholder="Paste the article text or a headline + key claims…",
+        "Headline or article text",
+        height=150,
+        placeholder="Paste a headline, a few sentences or a whole article",
         key="intake_text",
     )
     text = (user_text or "").strip()

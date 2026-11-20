@@ -27,6 +27,15 @@ def init_console_state() -> None:
         st.session_state.batch_stop_on_error = True
     if "batch_limit" not in st.session_state:
         st.session_state.batch_limit = 10
+    # Widgets below own their state through their key alone. Passing index=/value=
+    # computed from the previous run as well made every second click revert.
+    if st.session_state.get("sb_workflow") not in STEPS:
+        st.session_state.sb_workflow = st.session_state.console_step if st.session_state.console_step in STEPS else STEPS[0]
+    st.session_state.setdefault("sb_batch_limit", int(st.session_state.batch_limit))
+    st.session_state.setdefault("sb_stop_on_error", bool(st.session_state.batch_stop_on_error))
+
+
+STEPS = ["1) Input", "2) Model", "3) Actions", "4) Queue/Export"]
 
 
 def _queue_title(item: dict) -> str:
@@ -71,12 +80,10 @@ def render_console(
     _section("Workflow")
 
     # Step wizard
-    steps = ["1) Input", "2) Model", "3) Actions", "4) Queue/Export"]
     st.session_state.setdefault("_retrain", False)
     st.session_state.console_step = st.sidebar.radio(
         "Workflow",
-        steps,
-        index=steps.index(st.session_state.console_step) if st.session_state.console_step in steps else 0,
+        STEPS,
         horizontal=False,
         format_func=lambda s: s.split(") ", 1)[-1].replace("/", " & "),
         label_visibility="collapsed",
@@ -85,7 +92,7 @@ def render_console(
     _section("Settings")
 
     # Always-available controls
-    input_type: InputType = st.sidebar.selectbox("Input type", ["Text", "URL", "Image", "Video"])
+    input_type: InputType = st.sidebar.selectbox("Input type", ["Text", "URL", "Image", "Video"], key="sb_input_type")
 
     models = predictor.available_models()
     if st.session_state.get("model_choice") not in models:
@@ -124,7 +131,7 @@ def render_console(
         meta = input_result.meta or {}
         _section("Input status")
         if input_result.errors:
-            state, detail = "err", input_result.errors[0]
+            state, detail = "err", "Not ready yet. See the message under the input."
         elif input_result.extracted_text:
             state = "ok"
             detail = f"<b>{meta.get('words', 0)}</b> words · <b>{meta.get('chars', 0)}</b> chars ready"
@@ -135,8 +142,6 @@ def render_console(
             f'<div class="sb-card-v">{detail}</div></div>',
             unsafe_allow_html=True,
         )
-        for w in input_result.warnings:
-            st.sidebar.caption(w)
 
     if st.session_state.console_step == "2) Model":
         _section("Model card")
@@ -180,11 +185,9 @@ def render_console(
         _section("Actions")
         can_use = bool(input_result.extracted_text and not input_result.errors)
 
-        cols = st.sidebar.columns(2)
-        with cols[0]:
-            analyze_now = st.button("Analyze now", type="primary", use_container_width=True, disabled=not can_use)
-        with cols[1]:
-            add_queue = st.button("Add to queue", use_container_width=True, disabled=not can_use)
+        # "Analyze" lives on the input card in the main panel; the sidebar only queues.
+        add_queue = st.sidebar.button("Add to queue", use_container_width=True, disabled=not can_use)
+        st.sidebar.caption("Queue several inputs here, then run them together from Queue & Export.")
 
         if add_queue:
             text = input_result.extracted_text or ""
@@ -202,13 +205,11 @@ def render_console(
             )[: int(st.session_state.batch_limit)]
             st.sidebar.success("Added to queue.")
 
-        # Returning the 'analyze_now' flag via session_state is simplest for the caller
-        st.session_state._analyze_now = bool(analyze_now)
 
     if st.session_state.console_step == "4) Queue/Export":
         _section("Queue")
-        st.session_state.batch_limit = st.sidebar.slider("Max queue size", min_value=1, max_value=25, value=int(st.session_state.batch_limit))
-        st.session_state.batch_stop_on_error = st.sidebar.toggle("Stop batch on error", value=bool(st.session_state.batch_stop_on_error))
+        st.session_state.batch_limit = st.sidebar.slider("Max queue size", min_value=1, max_value=25, key="sb_batch_limit")
+        st.session_state.batch_stop_on_error = st.sidebar.toggle("Stop batch on error", key="sb_stop_on_error")
 
         q = st.session_state.queue
         st.sidebar.caption(f"Queued items: {len(q)}")
@@ -226,7 +227,7 @@ def render_console(
                     st.rerun()
 
             _section("Batch run")
-            st.session_state._run_queue = st.button("Run queue", type="primary", use_container_width=True)
+            st.session_state._run_queue = st.sidebar.button("Run queue", type="primary", use_container_width=True)
         else:
             st.session_state._run_queue = False
 
