@@ -1,0 +1,14 @@
+.git
+.github
+.venv
+.venv.broken
+.local
+.vscode
+__pycache__
+*.pyc
+.env
+data
+models
+attached_assets
+*.png
+streamlit.log

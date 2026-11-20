@@ -1,37 +1,76 @@
-📰 Fake News Detection System
+---
+title: Fake News Detector
+emoji: 📰
+colorFrom: red
+colorTo: gray
+sdk: docker
+app_port: 7860
+pinned: false
+short_description: Checks news claims against fact-checkers, news and Wikipedia
+---
 
-This project is a machine learning-based application designed to classify news articles as real or fake using Natural Language Processing (NLP) techniques. The system analyzes textual content and predicts its authenticity to help reduce the spread of misinformation.
+# Fake News Detector
 
-🚀 Features
-Classifies news as Real or Fake
-Text preprocessing using NLP techniques
-Multiple ML models for performance comparison
-Real-time prediction through user input
-Clean and simple interface for usability
-🧠 Tech Stack
-Programming Language: Python
-Libraries: Scikit-learn, Pandas, NumPy, NLTK
-Techniques: NLP, TF-IDF Vectorization
-Models Used: Logistic Regression, Naive Bayes, SVM
-⚙️ How It Works
-Data collection from labeled news datasets
-Text preprocessing (tokenization, stopword removal, stemming)
-Feature extraction using TF-IDF
-Training multiple machine learning models
-Evaluating models using accuracy, precision, recall, and F1-score
-Deploying the best model for real-time predictions
-📊 Results
+Paste a headline, an article, a link, a screenshot or a video clip. The app pulls out the factual claims and checks each one against live sources, then explains its verdict with links.
 
-The models were evaluated on standard classification metrics, and the best-performing model achieved high accuracy in detecting fake news.
+## How it works
 
-💡 Use Case
+1. **Extract text** from what you paste, a URL (article extraction), an image (Tesseract OCR) or a video (faster-whisper speech-to-text).
+2. **Find the claims.** The most check-worthy factual sentences are picked out.
+3. **Check each claim against sources**, with no API key needed:
+   - news headlines from Google News,
+   - fact-checker coverage (AFP, Snopes, PolitiFact, Full Fact, …),
+   - Wikipedia,
+   - optionally, published ratings from the Google Fact Check Tools API.
+4. **Judge the evidence.** Two small transformer models run locally with ONNX Runtime:
+   - MiniLM sentence embeddings find the sources that are really about the claim,
+   - a DeBERTa-v3 NLI model decides whether each source supports or contradicts it.
 
-This system can be used in:
+   Each claim is marked Supported, Contradicted, Disputed, Fact-checked or Not enough evidence.
+5. **Verdict.** Evidence decides when there is any. Otherwise a writing-style classifier is the fallback, and the app says so.
 
-Social media platforms
-News verification tools
-Content moderation systems
-🔮 Future Improvements
-Use Deep Learning models like LSTM or BERT
-Improve accuracy with larger datasets
-Deploy as a web application
+Outlets are labelled (fact-checker, established outlet, social media, satire, known unreliable), and linked articles get a warning when they're old or from a satire site.
+
+## Writing-style classifier
+
+Logistic regression on TF-IDF features plus writing-style signals (all-caps words, sensational phrases, missing attribution), trained on [pushpdeep/fake_news_combined](https://huggingface.co/datasets/pushpdeep/fake_news_combined) (~45k labelled articles).
+
+| Test | Result |
+|---|---|
+| Held-out test set (7,818 articles) | 98.7% |
+| Hand-written real-world headlines | 52/52 confident calls correct, 8 of 60 marked uncertain |
+| Style-swapped cases (true facts written casually, false claims written like wire news) | 0/13 |
+
+The last row is the classifier's limit: it judges wording, not facts. That's why the source check, not the classifier, decides the verdict whenever sources cover the claim. You can grade results in the app ("Was this right?") and retrain the classifier with your grades.
+
+## Run locally
+
+```bash
+pip install -r requirements.txt
+cp .env.example .env        # optional keys, see below
+streamlit run app.py
+```
+
+The first launch downloads the training data and models (~180 MB) and trains the classifier, which takes about 3 minutes once. `python train_model.py` does the same ahead of time.
+
+For image OCR, install [Tesseract](https://github.com/UB-Mannheim/tesseract/wiki) (on Windows the default install path is detected automatically).
+
+### Optional settings (`.env`)
+
+| Variable | What it adds |
+|---|---|
+| `GOOGLE_API_KEY` | Published fact-check ratings (Google Fact Check Tools API, free) |
+| `GOOGLE_CX` | Extra web results (Google Custom Search; needs `GOOGLE_API_KEY`) |
+| `WIKIMEDIA_CONTACT` | A URL or email sent to Wikipedia to identify the app, which raises its rate limits |
+
+## Deployment
+
+The included `Dockerfile` trains the classifier and downloads the models at build time, then serves the app on port 7860. It runs on Hugging Face Spaces (Docker SDK), Render, Railway or Fly.io.
+
+Serverless platforms such as Vercel can't host it: Streamlit needs a long-running server with websocket connections.
+
+To deploy on Hugging Face Spaces, the workflow in `.github/workflows/sync-to-hf.yml` copies every push on `main` to the Space. It needs:
+- a repository variable `HF_SPACE` (e.g. `your-username/fake-news-detector`),
+- a repository secret `HF_TOKEN` (a Hugging Face access token with write permission).
+
+Set `GOOGLE_API_KEY` and `WIKIMEDIA_CONTACT` as secrets in the Space's settings, not in the repo.

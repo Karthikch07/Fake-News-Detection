@@ -1,0 +1,19 @@
+# Runtime dependencies for deployment (Docker / Hugging Face Spaces).
+# Versions match the tested local environment.
+streamlit==1.48.0
+scikit-learn==1.7.1
+numpy==2.2.6
+scipy==1.16.1
+pandas==2.3.1
+pyarrow==21.0.0
+joblib==1.5.1
+requests==2.32.4
+trafilatura==2.0.0
+python-dotenv==1.2.4
+pytesseract==0.3.13
+pillow==11.3.0
+opencv-python-headless==4.12.0.88
+faster-whisper==1.2.1
+onnxruntime==1.32.0
+tokenizers==0.23.3
+huggingface-hub==2.4.0
