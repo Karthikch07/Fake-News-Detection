@@ -21,7 +21,10 @@ Thumbs.db
 
 # Local runtime data (live accuracy feedback, downloaded datasets)
 data/
-models/
+# The trained classifier is committed so hosts never have to train it (~6 MB).
+models/*
+!models/fake_news_model.joblib
+!models/fake_news_model.joblib.version
 .venv.broken/
 
 # Secrets (API keys)

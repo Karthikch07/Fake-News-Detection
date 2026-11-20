@@ -65,12 +65,21 @@ For image OCR, install [Tesseract](https://github.com/UB-Mannheim/tesseract/wiki
 
 ## Deployment
 
-The included `Dockerfile` trains the classifier and downloads the models at build time, then serves the app on port 7860. It runs on Hugging Face Spaces (Docker SDK), Render, Railway or Fly.io.
+Serverless platforms such as Vercel can't host this app: Streamlit needs a long-running server with websocket connections.
 
-Serverless platforms such as Vercel can't host it: Streamlit needs a long-running server with websocket connections.
+### Streamlit Community Cloud (free)
 
-To deploy on Hugging Face Spaces, the workflow in `.github/workflows/sync-to-hf.yml` copies every push on `main` to the Space. It needs:
-- a repository variable `HF_SPACE` (e.g. `your-username/fake-news-detector`),
-- a repository secret `HF_TOKEN` (a Hugging Face access token with write permission).
+1. Sign in at [share.streamlit.io](https://share.streamlit.io) with GitHub and click **Create app**.
+2. Pick this repository, branch `main`, main file `app.py`. Under **Advanced settings**, choose Python 3.12.
+3. In **Secrets**, add your optional keys in TOML format:
+   ```toml
+   GOOGLE_API_KEY = "your-key"
+   WIKIMEDIA_CONTACT = "https://github.com/your-name"
+   ```
+4. Click **Deploy**.
 
-Set `GOOGLE_API_KEY` and `WIKIMEDIA_CONTACT` as secrets in the Space's settings, not in the repo.
+The trained classifier (`models/`, ~6 MB) is committed, so the server never has to train it. The evidence models (~110 MB) download on first start. `packages.txt` installs Tesseract for image OCR. The app uses about 650 MB of memory.
+
+### Docker (Render, Railway, Fly.io, Hugging Face Spaces)
+
+The included `Dockerfile` trains the classifier and downloads the models at build time, then serves the app on port 7860. Hugging Face Docker Spaces now need a paid plan; `.github/workflows/sync-to-hf.yml` syncs `main` to a Space when the `HF_SPACE` variable and `HF_TOKEN` secret are set in the repository.
