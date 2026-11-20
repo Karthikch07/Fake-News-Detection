@@ -29,3 +29,6 @@ models/*
 
 # Secrets (API keys)
 .env
+
+# Replit-era uv lockfile: Streamlit Cloud prefers it over requirements.txt, so keep it local
+uv.lock
