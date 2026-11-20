@@ -1,308 +1,223 @@
-import streamlit as st
-import requests
-import json
-import os
-from urllib.parse import quote
-import trafilatura
-import numpy as np
+"""Fact verification: claim-by-claim evidence check plus optional search APIs.
 
-# Optional imports for advanced features
-try:
-    from sentence_transformers import SentenceTransformer
-    from sklearn.metrics.pairwise import cosine_similarity
-    SENTENCE_TRANSFORMERS_AVAILABLE = True
-except ImportError:
-    SENTENCE_TRANSFORMERS_AVAILABLE = False
+The claim check (components/evidence.py) needs no API keys: it searches
+Google News RSS and Wikipedia and judges each passage with local
+transformer models. Google Custom Search, Bing and the Google Fact Check
+Tools API are used in addition when their keys are set in .env.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+from urllib.parse import quote
+
+import requests
+
+from components import evidence
+from components import source_reputation as rep
+
+
+_TRUE_RATINGS = re.compile(r"^\s*(true|correct|accurate|mostly true|mostly correct|verdadero|vrai)\b", re.I)
+_FALSE_RATINGS = re.compile(
+    r"\b(false|fake|pants on fire|misleading|incorrect|inaccurate|no evidence|not true|untrue|baseless|"
+    r"fabricated|hoax|scam|altered|doctored|manipulated|satire|unproven|unsupported|debunked|wrong|"
+    r"exaggerat\w*|distort\w*|missing context|out of context|lacks context|partly false|mostly false|"
+    r"no scientific|not supported|there is no|there's no|we've seen no|faux|falso)\b",
+    re.I,
+)
+
+
+def _norm_title(title: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (title or "").lower()).strip()[:80]
+
+
+def rating_stance(rating: str) -> str:
+    """Map a fact-checker's textual rating to a stance on the claim it reviewed."""
+    if _FALSE_RATINGS.search(rating or ""):
+        return "contradicts"
+    if _TRUE_RATINGS.search(rating or ""):
+        return "supports"
+    return "neutral"
+
 
 class FactVerifier:
     def __init__(self):
-        """Initialize fact verification component"""
-        # Try to load sentence transformer for similarity matching
-        if SENTENCE_TRANSFORMERS_AVAILABLE:
-            try:
-                self.sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
-            except Exception as e:
-                st.warning(f"Sentence transformer not available: {e}")
-                self.sentence_model = None
-        else:
-            self.sentence_model = None
-        
-        # Trusted news domains for verification
-        self.trusted_domains = [
-            'reuters.com', 'bbc.com', 'cnn.com', 'npr.org', 'apnews.com',
-            'nytimes.com', 'washingtonpost.com', 'theguardian.com',
-            'abcnews.go.com', 'cbsnews.com', 'nbcnews.com', 'foxnews.com',
-            'usatoday.com', 'wsj.com', 'bloomberg.com', 'economist.com'
-        ]
-        
-        # API keys from environment variables
         self.google_api_key = os.getenv("GOOGLE_API_KEY", "")
         self.google_cx = os.getenv("GOOGLE_CX", "")
         self.bing_api_key = os.getenv("BING_API_KEY", "")
-        self._fallback_notice_shown = False
-    
-    def verify_claims(self, text):
-        """Verify claims by searching credible sources"""
+        self.models_error = ""
+        self.embedder = self.nli = None
         try:
-            # Extract key claims/entities from text
-            search_queries = self.extract_search_queries(text)
+            from components.nlp_models import get_embedder, get_nli
 
-            has_google = bool(self.google_api_key and self.google_cx)
-            has_bing = bool(self.bing_api_key)
+            self.embedder = get_embedder()
+            self.nli = get_nli()
+        except Exception as e:  # offline on first run, or onnxruntime missing
+            self.models_error = f"{type(e).__name__}: {e}"
 
-            # If no external API is configured, return a deterministic offline fallback.
-            if not has_google and not has_bing:
-                sources = self.fallback_search(search_queries)
-                ranked_sources = self.rank_sources(text, self.deduplicate_sources(sources))
-                return {
-                    'sources': ranked_sources[:5],
-                    'search_queries': search_queries
-                }
+    @property
+    def models_ready(self) -> bool:
+        return self.embedder is not None and self.nli is not None
 
-            sources = []
-            for query in search_queries:
-                # Try Google Search first, then Bing if available
-                if has_google:
-                    google_results = self.search_google(query)
-                    sources.extend(google_results)
-                elif has_bing:
-                    bing_results = self.search_bing(query)
-                    sources.extend(bing_results)
-            
-            # Remove duplicates and rank by relevance
-            unique_sources = self.deduplicate_sources(sources)
-            ranked_sources = self.rank_sources(text, unique_sources)
-            
-            return {
-                'sources': ranked_sources[:5],  # Return top 5 sources
-                'search_queries': search_queries
-            }
-            
-        except Exception as e:
-            st.error(f"Error in fact verification: {str(e)}")
-            return {'sources': [], 'search_queries': []}
-    
-    def extract_search_queries(self, text):
-        """Extract relevant search queries from the news text"""
-        # Simple approach: split text into chunks and create search queries
-        import re
-        
-        # Remove common stop words and extract potential entities/claims
-        words = text.split()
-        
-        # Look for potential entities (capitalized words, numbers, dates)
-        entities = []
-        for word in words:
-            word = re.sub(r'[^\w\s]', '', word)
-            if word and (word[0].isupper() or word.isdigit()):
-                entities.append(word)
-        
-        # Create search queries
-        queries = []
-        
-        # Use the first 50 words as main query
-        main_query = ' '.join(words[:50])
-        queries.append(main_query)
-        
-        # Create entity-based queries
-        if entities:
-            entity_query = ' '.join(entities[:10])
-            queries.append(entity_query)
-        
-        # Look for specific claims or statements
-        sentences = text.split('.')
-        for sentence in sentences[:3]:  # First 3 sentences
-            sentence = sentence.strip()
-            if len(sentence.split()) > 5:  # Meaningful sentences
-                queries.append(sentence)
-        
-        return queries[:3]  # Return top 3 queries
-    
-    def search_google(self, query):
-        """Search using Google Custom Search API"""
-        try:
-            url = "https://www.googleapis.com/customsearch/v1"
-            params = {
-                'key': self.google_api_key,
-                'cx': self.google_cx,
-                'q': query,
-                'num': 5,
-                'dateRestrict': 'y1',  # Last year
-                'safe': 'active'
-            }
-            
-            response = requests.get(url, params=params, timeout=10)
-            response.raise_for_status()
-            
-            data = response.json()
-            sources = []
-            
-            if 'items' in data:
-                for item in data['items']:
-                    url = item.get('link', '')
-                    domain = self.extract_domain(url)
-                    
-                    if any(trusted in domain for trusted in self.trusted_domains):
-                        source = {
-                            'title': item.get('title', ''),
-                            'url': url,
-                            'summary': item.get('snippet', ''),
-                            'domain': domain,
-                            'source_type': 'google_search'
-                        }
-                        sources.append(source)
-            
-            return sources
-            
-        except Exception as e:
-            st.warning(f"Google search failed: {str(e)}")
-            return []
-    
-    def search_bing(self, query):
-        """Search using Bing Search API"""
-        try:
-            url = "https://api.bing.microsoft.com/v7.0/search"
-            headers = {'Ocp-Apim-Subscription-Key': self.bing_api_key}
-            params = {
-                'q': query,
-                'count': 5,
-                'freshness': 'Month',
-                'safeSearch': 'Moderate'
-            }
-            
-            response = requests.get(url, headers=headers, params=params, timeout=10)
-            response.raise_for_status()
-            
-            data = response.json()
-            sources = []
-            
-            if 'webPages' in data and 'value' in data['webPages']:
-                for item in data['webPages']['value']:
-                    url = item.get('url', '')
-                    domain = self.extract_domain(url)
-                    
-                    if any(trusted in domain for trusted in self.trusted_domains):
-                        source = {
-                            'title': item.get('name', ''),
-                            'url': url,
-                            'summary': item.get('snippet', ''),
-                            'domain': domain,
-                            'source_type': 'bing_search'
-                        }
-                        sources.append(source)
-            
-            return sources
-            
-        except Exception as e:
-            st.warning(f"Bing search failed: {str(e)}")
-            return []
-    
-    def fallback_search(self, queries):
-        """Offline fallback when APIs are not available."""
-        if isinstance(queries, str):
-            query_list = [queries]
-        else:
-            query_list = [q for q in (queries or []) if q and q.strip()]
-
-        if not query_list:
-            query_list = ["submitted claim"]
-
-        fallback_sources = []
-        source_catalog = [
-            "reuters.com",
-            "apnews.com",
-            "bbc.com",
-            "npr.org",
-            "theguardian.com",
-        ]
-
-        for i, query in enumerate(query_list[:3]):
-            domain = source_catalog[i % len(source_catalog)]
-            # Use a stable, public search URL filtered to each trusted domain.
-            search_query = f"site:{domain} {query[:80]}"
-            encoded_query = quote(search_query)
-            fallback_sources.append(
-                {
-                    'title': f"Offline verification note: {query[:70]}",
-                    'url': f"https://duckduckgo.com/?q={encoded_query}",
-                    'summary': (
-                        "API keys are not configured, so this result was generated using "
-                        "offline fallback guidance for further manual verification."
-                    ),
-                    'domain': domain,
-                    'source_type': 'offline_fallback'
-                }
+    # ------------------------------------------------------------------ main
+    def verify_claims(self, text: str, page_url: str | None = None) -> dict:
+        result: dict = {
+            "mode": "live",
+            "claims": [],
+            "overall": evidence.overall_verdict([]),
+            "stale_warning": None,
+            "fact_checks": [],
+            "sources": [],
+            "manual_check_links": self.manual_check_links(text),
+            "search_queries": [],
+            "errors": [],
+        }
+        if not self.models_ready:
+            result["mode"] = "unavailable"
+            result["errors"].append(
+                "The evidence models couldn't be loaded, so claims weren't checked automatically "
+                f"({self.models_error}). Check your internet connection and restart the app."
             )
+            return result
 
-        return fallback_sources
-    
-    def extract_domain(self, url):
-        """Extract domain from URL"""
+        checked = evidence.check_text(text, self.embedder, self.nli)
+        if self.google_api_key:
+            self._add_rated_fact_checks(checked)
+        result.update(claims=checked["claims"], overall=checked["overall"], stale_warning=checked["stale_warning"])
+        result["search_queries"] = [q for c in checked["claims"] for q in c.get("queries", [])[:1]]
+        errs = {e for c in checked["claims"] for e in c.get("errors", [])}
+        result["errors"].extend(sorted(errs))
+
+        # Published fact-checks found among the evidence.
+        seen = set()
+        for c in checked["claims"]:
+            for e in c["evidence"]:
+                key = _norm_title(e["title"]) or e["url"]
+                if e["kind"] == "fact_check" and key not in seen and e["similarity"] >= evidence.MIN_SUPPORT_SIMILARITY:
+                    seen.add(key)
+                    rating = e.get("published_rating") or ("Rated false" if e["stance"] == "contradicts" else "")
+                    result["fact_checks"].append({
+                        "claim": c["claim"], "title": e["title"], "url": e["url"], "publisher": e["outlet"],
+                        "date": e.get("date", ""), "rating": rating[:60],
+                    })
+
+        # Optional keyed web search, listed as extra coverage.
+        if (self.google_api_key and self.google_cx) or self.bing_api_key:
+            q = self.key_query(text)
+            found = self.search_google(q) if self.google_api_key and self.google_cx else self.search_bing(q)
+            result["sources"] = found[:5]
+        if page_url:
+            result["page_source"] = rep.describe(page_url)
+        return result
+
+    # ------------------------------------------- rated fact-checks (Google API)
+    def _add_rated_fact_checks(self, checked: dict) -> None:
+        """Add published fact-check ratings as evidence and re-score each claim.
+
+        A rating counts only when the fact-checked claim closely matches ours
+        (same embedding model as the rest of the evidence).
+        """
+        for c in checked["claims"]:
+            reviews = self.search_fact_checks(evidence.search_query(c["claim"], 8) or c["claim"])
+            if not reviews:
+                continue
+            vecs = self.embedder.encode([c["claim"]] + [r["claim"] or r["title"] for r in reviews])
+            sims = vecs[1:] @ vecs[0]
+            known = {e["url"] for e in c["evidence"]}
+            by_title = {_norm_title(e["title"]): e for e in c["evidence"]}
+            for r, sim in zip(reviews, sims):
+                if sim < evidence.MIN_CONTRA_SIMILARITY or not r["url"] or r["url"] in known:
+                    continue
+                verdict = rating_stance(r["rating"])
+                same = by_title.get(_norm_title(r["title"]))
+                if same is not None:
+                    # Already found via news search: attach the published rating to it.
+                    same.update(kind="fact_check", rating="fact_checker", published_rating=r["rating"])
+                    if verdict != "neutral":
+                        same.update(stance=verdict, p_support=0.95 if verdict == "supports" else 0.0,
+                                    p_contradict=0.95 if verdict == "contradicts" else 0.0)
+                    continue
+                c["evidence"].insert(0, {
+                    "text": r["claim"] or r["title"], "title": r["title"] or r["claim"], "url": r["url"],
+                    "outlet": r["publisher"], "domain": rep.domain_of(r["url"]), "date": r["date"],
+                    "kind": "fact_check", "rating": "fact_checker", "similarity": float(sim), "shared_terms": 2,
+                    "stance": verdict, "p_support": 0.95 if verdict == "supports" else 0.0,
+                    "p_contradict": 0.95 if verdict == "contradicts" else 0.0, "published_rating": r["rating"],
+                })
+            S = sum(e["similarity"] * rep.EVIDENCE_WEIGHT[e["rating"]] * e["p_support"]
+                    for e in c["evidence"] if e["stance"] == "supports")
+            C = sum(e["similarity"] * rep.EVIDENCE_WEIGHT[e["rating"]] * e["p_contradict"]
+                    for e in c["evidence"] if e["stance"] == "contradicts")
+            c["support_score"], c["contradict_score"] = round(S, 3), round(C, 3)
+            c["verdict"] = evidence._claim_verdict(S, C, c["evidence"])
+        checked["overall"] = evidence.overall_verdict(checked["claims"])
+
+    # --------------------------------------------------------- keyed search
+    def search_google(self, query: str) -> list[dict]:
         try:
-            from urllib.parse import urlparse
-            parsed = urlparse(url)
-            return parsed.netloc.lower()
-        except:
-            return ""
-    
-    def deduplicate_sources(self, sources):
-        """Remove duplicate sources"""
-        seen_urls = set()
-        unique_sources = []
-        
-        for source in sources:
-            url = source.get('url', '')
-            if url and url not in seen_urls:
-                seen_urls.add(url)
-                unique_sources.append(source)
-        
-        return unique_sources
-    
-    def rank_sources(self, original_text, sources):
-        """Rank sources by relevance to original text"""
-        if not sources or not self.sentence_model:
-            # Simple ranking by domain trust if no sentence model
-            domain_scores = {}
-            for domain in self.trusted_domains:
-                domain_scores[domain] = len(self.trusted_domains) - self.trusted_domains.index(domain)
-            
-            for source in sources:
-                domain = source.get('domain', '')
-                score = 50  # Default score
-                for trusted_domain in domain_scores:
-                    if trusted_domain in domain:
-                        score = domain_scores[trusted_domain] * 10
-                        break
-                source['relevance_score'] = score
-            
-            return sorted(sources, key=lambda x: x.get('relevance_score', 0), reverse=True)
-        
+            r = requests.get("https://www.googleapis.com/customsearch/v1", params={
+                "key": self.google_api_key, "cx": self.google_cx, "q": query, "num": 8, "safe": "active",
+            }, timeout=10)
+            r.raise_for_status()
+            return self._web_items((i.get("title", ""), i.get("link", ""), i.get("snippet", ""))
+                                   for i in r.json().get("items", []))
+        except Exception:
+            return []  # never surface the exception: its message contains the key
+
+    def search_bing(self, query: str) -> list[dict]:
         try:
-            # Use sentence similarity for ranking
-            original_embedding = self.sentence_model.encode([original_text])
-            
-            for source in sources:
-                source_text = f"{source.get('title', '')} {source.get('summary', '')}"
-                source_embedding = self.sentence_model.encode([source_text])
-                
-                # Calculate cosine similarity
-                similarity = cosine_similarity(original_embedding, source_embedding)[0][0]
-                source['relevance_score'] = float(similarity * 100)
-            
-            # Sort by relevance score
-            return sorted(sources, key=lambda x: x.get('relevance_score', 0), reverse=True)
-            
-        except Exception as e:
-            st.warning(f"Error in ranking sources: {str(e)}")
-            return sources
-    
-    def extract_source_content(self, url):
-        """Extract full content from source URL"""
+            r = requests.get("https://api.bing.microsoft.com/v7.0/search",
+                             headers={"Ocp-Apim-Subscription-Key": self.bing_api_key},
+                             params={"q": query, "count": 8, "safeSearch": "Moderate"}, timeout=10)
+            r.raise_for_status()
+            return self._web_items((i.get("name", ""), i.get("url", ""), i.get("snippet", ""))
+                                   for i in r.json().get("webPages", {}).get("value", []))
+        except Exception:
+            return []
+
+    @staticmethod
+    def _web_items(rows) -> list[dict]:
+        out = []
+        for title, url, snippet in rows:
+            rating = rep.rate(url)
+            if rating in ("reputable", "fact_checker"):
+                out.append({"title": title, "url": url, "summary": snippet, "domain": rep.domain_of(url), "rating": rating})
+        return out
+
+    def search_fact_checks(self, text: str, max_results: int = 5) -> list[dict]:
+        """Google Fact Check Tools API (ClaimReview data from Snopes, PolitiFact, AFP, ...)."""
         try:
-            downloaded = trafilatura.fetch_url(url)
-            if downloaded:
-                return trafilatura.extract(downloaded)
-            return None
-        except Exception as e:
-            st.warning(f"Failed to extract content from {url}: {str(e)}")
-            return None
+            r = requests.get("https://factchecktools.googleapis.com/v1alpha1/claims:search", params={
+                "query": self.key_query(text, 10), "key": self.google_api_key,
+                "pageSize": max_results, "languageCode": "en",
+            }, timeout=10)
+            r.raise_for_status()
+        except Exception:
+            return []
+        out = []
+        for claim in r.json().get("claims", []):
+            for review in claim.get("claimReview", [])[:1]:
+                out.append({
+                    "claim": claim.get("text", ""), "title": review.get("title", ""), "url": review.get("url", ""),
+                    "publisher": (review.get("publisher") or {}).get("name", ""),
+                    "rating": review.get("textualRating", ""), "date": review.get("reviewDate", "")[:10],
+                })
+        return out[:max_results]
+
+    # ------------------------------------------------------------- helpers
+    @staticmethod
+    def key_query(text: str, max_words: int = 10) -> str:
+        claims = evidence.extract_claims(text, max_claims=1)
+        return evidence.search_query(claims[0] if claims else text[:300], max_words) or text[:100]
+
+    def manual_check_links(self, text: str) -> list[dict]:
+        q = self.key_query(text)
+        enc = quote(q)
+        return [
+            {"name": "Google Fact Check", "url": f"https://toolbox.google.com/factcheck/explorer/search/{enc}"},
+            {"name": "Google News", "url": f"https://news.google.com/search?q={enc}"},
+            {"name": "Snopes", "url": f"https://www.snopes.com/search/?q={enc}"},
+            {"name": "Reuters Fact Check", "url": f"https://duckduckgo.com/?q={quote('site:reuters.com/fact-check ' + q)}"},
+            {"name": "AP News", "url": f"https://duckduckgo.com/?q={quote('site:apnews.com ' + q)}"},
+        ]

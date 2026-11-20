@@ -1,242 +1,96 @@
-import streamlit as st
-import numpy as np
-import re
+"""Community Notes and the final verdict, built from the claim-by-claim evidence."""
 
-# Optional imports for advanced features
-try:
-    from sentence_transformers import SentenceTransformer
-    from sklearn.metrics.pairwise import cosine_similarity
-    SENTENCE_TRANSFORMERS_AVAILABLE = True
-except ImportError:
-    SENTENCE_TRANSFORMERS_AVAILABLE = False
+from __future__ import annotations
+
+VERDICT_WORDS = {"True": "likely real", "False": "likely fake", "Uncertain": "uncertain"}
+
+
+def verdict_sentence(prediction_result: dict) -> str:
+    label = prediction_result.get("prediction_label") or prediction_result.get("prediction")
+    confidence = prediction_result.get("confidence")
+    words = VERDICT_WORDS.get(label, str(label))
+    if isinstance(confidence, (int, float)):
+        return f"The writing-style classifier rates this as **{words}** ({confidence:.0f}% confidence)."
+    return f"The writing-style classifier rates this as **{words}**."
+
+
+def final_assessment(prediction: dict | None, verification: dict | None) -> dict:
+    """One verdict for the result: evidence decides when there is any, style otherwise.
+
+    Returns {label, kind ('fake'|'real'|'unsure'), basis, reason}.
+    """
+    prediction = prediction or {}
+    overall = (verification or {}).get("overall") or {}
+    ev = overall.get("label", "Unverified")
+    style = prediction.get("prediction_label", "Uncertain")
+    style_fake = style == "False"
+
+    if ev == "Contradicted":
+        return {"label": "Likely false", "kind": "fake", "basis": "evidence",
+                "reason": "Sources contradict the claim."}
+    if ev in ("Mixed", "Disputed"):
+        return {"label": "Disputed", "kind": "unsure", "basis": "evidence",
+                "reason": overall.get("text", "Sources disagree.")}
+    if ev == "Fact-checked":
+        return {"label": "Fact-checked: read the rating", "kind": "unsure", "basis": "evidence",
+                "reason": "A fact-checker has covered this claim. Their rating is linked below."}
+    if ev == "Supported":
+        reason = "Sources support the claims."
+        if style_fake:
+            reason += " The wording is sensational, but the facts check out."
+        return {"label": "Likely true", "kind": "real", "basis": "evidence", "reason": reason}
+    if ev == "Partly supported":
+        if style_fake:
+            return {"label": "Uncertain", "kind": "unsure", "basis": "evidence + style",
+                    "reason": "Some claims are supported, but the wording looks like misinformation and other claims couldn't be checked."}
+        return {"label": "Likely true", "kind": "real", "basis": "evidence",
+                "reason": "The checkable claims are supported by sources."}
+    # No usable evidence: only the writing style is left to go on.
+    if style == "False":
+        return {"label": "Likely fake", "kind": "fake", "basis": "writing style only",
+                "reason": "No source confirms it and the wording matches misinformation. Not fact-checked."}
+    if style == "True":
+        return {"label": "Unverified", "kind": "unsure", "basis": "writing style only",
+                "reason": "Reads like normal news, but no source could confirm it."}
+    return {"label": "Uncertain", "kind": "unsure", "basis": "writing style only",
+            "reason": "No source confirms or contradicts it, and the writing style is inconclusive."}
+
 
 class CommunityNotesGenerator:
-    def __init__(self):
-        """Initialize Community Notes generator"""
-        if SENTENCE_TRANSFORMERS_AVAILABLE:
-            try:
-                self.sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
-            except Exception as e:
-                st.warning(f"Sentence transformer not available for Community Notes: {e}")
-                self.sentence_model = None
+    def generate_notes(self, original_text: str, prediction_result: dict, verification_result: dict) -> dict:
+        claims = verification_result.get("claims") or []
+        contradictions, confirmations, references = [], [], []
+        for c in claims:
+            short = c["claim"] if len(c["claim"]) <= 140 else c["claim"][:137] + "…"
+            for e in c.get("evidence", []):
+                ref = {"title": e["title"] if e["kind"] != "reference" else f"Wikipedia: {e['title']}",
+                       "url": e["url"], "source": e.get("outlet") or e.get("domain")}
+                if e["stance"] == "contradicts":
+                    contradictions.append({"claim": short, **ref, "text": e["text"]})
+                elif e["stance"] == "supports":
+                    confirmations.append({"claim": short, **ref, "text": e["text"]})
+                else:
+                    continue
+                if ref["url"] not in {r["url"] for r in references}:
+                    references.append(ref)
+
+        final = final_assessment(prediction_result, verification_result)
+        overall = verification_result.get("overall") or {}
+        parts = []
+        if claims:
+            n = len(claims)
+            parts.append(f"{n} claim{'s' if n != 1 else ''} checked against news coverage, fact-checkers and Wikipedia. "
+                         f"{overall.get('text', '')}")
         else:
-            self.sentence_model = None
-    
-    def generate_notes(self, original_text, prediction_result, verification_result):
-        """Generate Community Notes-style contrast report"""
-        try:
-            # Extract claims from original text
-            original_claims = self.extract_claims(original_text)
-            
-            # Compare with sources
-            contradictions = []
-            confirmations = []
-            references = []
-            
-            for source in verification_result.get('sources', []):
-                source_analysis = self.analyze_source_against_claims(
-                    original_claims, source
-                )
-                
-                if source_analysis['contradictions']:
-                    contradictions.extend(source_analysis['contradictions'])
-                
-                if source_analysis['confirmations']:
-                    confirmations.extend(source_analysis['confirmations'])
-                
-                # Add reference
-                references.append({
-                    'source': source['domain'],
-                    'url': source['url'],
-                    'title': source['title']
-                })
-            
-            # Generate summary based on prediction and sources
-            summary = self.generate_summary(
-                original_text, 
-                prediction_result, 
-                contradictions, 
-                confirmations
-            )
-            
-            return {
-                'contradictions': list(set(contradictions)),  # Remove duplicates
-                'confirmations': list(set(confirmations)),
-                'summary': summary,
-                'references': references,
-                'original_claims': original_claims
-            }
-            
-        except Exception as e:
-            st.error(f"Error generating Community Notes: {str(e)}")
-            return {
-                'contradictions': [],
-                'confirmations': [],
-                'summary': "Unable to generate Community Notes due to an error.",
-                'references': [],
-                'original_claims': []
-            }
-    
-    def extract_claims(self, text):
-        """Extract key claims from the original text"""
-        # Split text into sentences
-        sentences = re.split(r'[.!?]+', text)
-        
-        claims = []
-        for sentence in sentences:
-            sentence = sentence.strip()
-            if len(sentence.split()) > 5:  # Meaningful sentences
-                # Look for factual claims (contains numbers, dates, names)
-                if (any(word.isdigit() for word in sentence.split()) or 
-                    any(word[0].isupper() for word in sentence.split() if word) or
-                    any(keyword in sentence.lower() for keyword in [
-                        'said', 'reported', 'announced', 'confirmed', 'revealed',
-                        'according', 'study', 'research', 'data', 'percent'
-                    ])):
-                    claims.append(sentence)
-        
-        return claims[:5]  # Return top 5 claims
-    
-    def analyze_source_against_claims(self, claims, source):
-        """Analyze a source against original claims"""
-        source_text = f"{source.get('title', '')} {source.get('summary', '')}"
-        contradictions = []
-        confirmations = []
-        
-        if not self.sentence_model:
-            # Simple keyword-based analysis when sentence model is not available
-            return self.simple_claim_analysis(claims, source_text, source)
-        
-        try:
-            # Use semantic similarity for claim analysis
-            source_embedding = self.sentence_model.encode([source_text])
-            
-            for claim in claims:
-                claim_embedding = self.sentence_model.encode([claim])
-                similarity = cosine_similarity(claim_embedding, source_embedding)[0][0]
-                
-                # High similarity suggests confirmation or contradiction
-                if similarity > 0.6:
-                    # Check for contradiction indicators
-                    if self.check_contradiction_indicators(claim, source_text):
-                        contradictions.append(f"Source contradicts: '{claim[:100]}...'")
-                    else:
-                        confirmations.append(f"Source supports: '{claim[:100]}...'")
-        
-        except Exception as e:
-            st.warning(f"Error in semantic analysis: {str(e)}")
-            return self.simple_claim_analysis(claims, source_text, source)
-        
+            parts.append("No checkable factual claim was found in this text.")
+        if final["basis"] == "writing style only":
+            parts.append(verdict_sentence(prediction_result) + " That judges wording only, not facts.")
+        if verification_result.get("stale_warning"):
+            parts.append(verification_result["stale_warning"])
         return {
-            'contradictions': contradictions,
-            'confirmations': confirmations
+            "summary": " ".join(p.strip() for p in parts if p.strip()),
+            "contradictions": contradictions[:8],
+            "confirmations": confirmations[:8],
+            "references": references[:12],
+            "original_claims": [c["claim"] for c in claims],
         }
-    
-    def simple_claim_analysis(self, claims, source_text, source):
-        """Simple keyword-based claim analysis fallback"""
-        contradictions = []
-        confirmations = []
-        
-        contradiction_keywords = [
-            'denies', 'refutes', 'false', 'incorrect', 'untrue', 'debunked',
-            'misleading', 'no evidence', 'not supported', 'contradicts'
-        ]
-        
-        confirmation_keywords = [
-            'confirms', 'supports', 'verifies', 'true', 'correct', 'accurate',
-            'evidence shows', 'data indicates', 'research suggests'
-        ]
-        
-        source_lower = source_text.lower()
-        
-        for claim in claims:
-            claim_words = set(claim.lower().split())
-            source_words = set(source_lower.split())
-            
-            # Check for word overlap
-            overlap = len(claim_words.intersection(source_words))
-            if overlap > 2:  # Some overlap suggests relevance
-                
-                # Check for contradiction indicators
-                if any(keyword in source_lower for keyword in contradiction_keywords):
-                    contradictions.append(
-                        f"'{source['domain']}' appears to contradict the claim: '{claim[:100]}...'"
-                    )
-                
-                # Check for confirmation indicators
-                elif any(keyword in source_lower for keyword in confirmation_keywords):
-                    confirmations.append(
-                        f"'{source['domain']}' appears to support the claim: '{claim[:100]}...'"
-                    )
-        
-        return {
-            'contradictions': contradictions,
-            'confirmations': confirmations
-        }
-    
-    def check_contradiction_indicators(self, claim, source_text):
-        """Check if source text contradicts the claim"""
-        contradiction_patterns = [
-            'no evidence', 'false', 'incorrect', 'untrue', 'denies',
-            'refutes', 'contradicts', 'disputes', 'debunked', 'misleading'
-        ]
-        
-        source_lower = source_text.lower()
-        return any(pattern in source_lower for pattern in contradiction_patterns)
-    
-    def generate_summary(self, original_text, prediction_result, contradictions, confirmations):
-        """Generate a summary for the Community Notes"""
-        prediction = prediction_result['prediction']
-        accuracy = prediction_result.get('accuracy')
-        
-        summary_parts = []
-        
-        # Start with prediction
-        if isinstance(accuracy, (int, float)):
-            summary_parts.append(
-                f"AI analysis suggests this content is **{prediction}** "
-                f"({accuracy:.0f}% model accuracy)."
-            )
-        else:
-            summary_parts.append(
-                f"AI analysis suggests this content is **{prediction}** "
-                "(model accuracy unavailable)."
-            )
-        
-        # Add contradiction information
-        if contradictions:
-            summary_parts.append(
-                f"Multiple credible sources contradict key claims in this content. "
-                f"({len(contradictions)} contradiction(s) found)"
-            )
-        
-        # Add confirmation information
-        if confirmations:
-            summary_parts.append(
-                f"Some claims appear to be supported by credible sources. "
-                f"({len(confirmations)} confirmation(s) found)"
-            )
-        
-        # Overall assessment
-        if contradictions and not confirmations:
-            summary_parts.append(
-                "**Community Note:** This content appears to contain misinformation "
-                "based on fact-checking against credible sources."
-            )
-        elif confirmations and not contradictions:
-            summary_parts.append(
-                "**Community Note:** This content appears to be largely supported "
-                "by credible sources."
-            )
-        elif contradictions and confirmations:
-            summary_parts.append(
-                "**Community Note:** This content contains mixed information - "
-                "some claims are supported while others are contradicted by credible sources."
-            )
-        else:
-            summary_parts.append(
-                "**Community Note:** Unable to fully verify this content against "
-                "available credible sources. Further verification recommended."
-            )
-        
-        return " ".join(summary_parts)

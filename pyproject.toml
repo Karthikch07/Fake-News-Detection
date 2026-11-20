@@ -16,6 +16,10 @@ dependencies = [
     "scikit-learn>=1.7.1",
     "streamlit>=1.48.0",
     "trafilatura>=2.0.0",
+    "faster-whisper>=1.1",
+    "onnxruntime>=1.17",
+    "tokenizers>=0.15",
+    "huggingface-hub>=0.20",
 ]
 
 [[tool.uv.index]]
@@ -476,7 +480,6 @@ hjxdl = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]
 hkkang-utils = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]
 hordelib = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]
 hpsv2 = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]
-huggingface-hub = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]
 hummingbird-ml = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]
 hvae-backbone = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]
 hya = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]

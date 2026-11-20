@@ -18,3 +18,11 @@ streamlit.log
 # OS files
 .DS_Store
 Thumbs.db
+
+# Local runtime data (live accuracy feedback, downloaded datasets)
+data/
+models/
+.venv.broken/
+
+# Secrets (API keys)
+.env
